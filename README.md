@@ -18,7 +18,7 @@
 确保内核开启了以下功能（大多数现代发行版如 Ubuntu 20.04+ 已开启）：
 - `CONFIG_BPF=y`
 - `CONFIG_BPF_LSM=y` (用于文件/进程防护)
-- `CONFIG_DEBUG_INFO_BTF=y` (支持免头文件 BPF 编译)
+- `CONFIG_DEBUG_INFO_BTF=y` (关键：支持 BPF CO-RE 特性，实现一次编译到处运行)
 - `CONFIG_BPF_JIT=y`
 
 **检查命令**:
