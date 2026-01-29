@@ -67,6 +67,8 @@ struct NetworkConfig {
     pub mod_rules: Vec<PacketModRuleConfig>,
     #[serde(default)]
     pub forward_rules: Vec<ForwardRuleConfig>,
+    #[serde(default)]
+    pub local_forward_rules: Vec<LocalForwardRuleConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -79,7 +81,39 @@ struct ForwardRuleConfig {
     pub allowed_sources: Vec<String>,
 }
 
+/// 本地端口转发规则配置 - 重定向到本机指定端口
+#[derive(Debug, Serialize, Deserialize)]
+struct LocalForwardRuleConfig {
+    pub listen_port: Vec<serde_json::Value>,
+    pub target_port: u16,
+    pub protocol: String,
+    #[serde(default)]
+    pub allowed_sources: Vec<String>,
+}
+
 impl ForwardRuleConfig {
+    fn expand_ports(&self) -> Vec<u16> {
+        let mut ports = Vec::new();
+        for port_val in &self.listen_port {
+            if let Some(port) = port_val.as_u64() {
+                ports.push(port as u16);
+            } else if let Some(range) = port_val.as_str() {
+                let parts: Vec<&str> = range.split('-').collect();
+                if parts.len() == 2 {
+                    if let (Ok(start), Ok(end)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>())
+                    {
+                        for p in start..=end {
+                            ports.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        ports
+    }
+}
+
+impl LocalForwardRuleConfig {
     fn expand_ports(&self) -> Vec<u16> {
         let mut ports = Vec::new();
         for port_val in &self.listen_port {
@@ -424,6 +458,63 @@ fn populate_maps(bpf: &mut Bpf, config: &UnifiedConfig) -> anyhow::Result<()> {
                 // because the key is only (proto, dir, dst_ip, src_port, dst_port).
                 // To support multiple sources, we would need to include src_ip in the key.
                 pkt_mod_rules.insert(key, val, 0)?;
+            }
+        }
+    }
+
+    // Process local forward rules - 重定向到本机端口
+    for rule in &config.network.local_forward_rules {
+        info!("Processing local forward rule: listen={:?} -> target_port={}", 
+              rule.listen_port, rule.target_port);
+
+        // Handle allowed sources
+        let sources = if rule.allowed_sources.is_empty() {
+            vec!["0.0.0.0/0".to_string()]
+        } else {
+            rule.allowed_sources.clone()
+        };
+
+        for source in sources {
+            let (allowed_ip, allowed_mask) = parse_cidr(&source)?;
+
+            for port in rule.expand_ports() {
+                let key = PktModKey {
+                    protocol: match rule.protocol.as_str() {
+                        "tcp" => 6,
+                        "udp" => 17,
+                        _ => 6,
+                    },
+                    direction: 1, // Ingress
+                    padding: [0; 2],
+                    dst_ip: 0,   // Any local IP
+                    src_port: 0, // Any source port
+                    dst_port: port.to_be(),
+                };
+
+                let val = PktModValue {
+                    tcp_flags_enable: 0,
+                    tcp_set_ecn_echo: 0,
+                    tcp_set_cwr: 0,
+                    tcp_set_reserved: 0,
+                    tcp_flags_mask: 0,
+                    tcp_flags_value: 0,
+                    reserved_bits_mask: 0,
+                    reserved_bits_value: 0,
+                    port_mod_enable: 1,
+                    new_src_port: 0,
+                    new_dst_port: rule.target_port.to_be(),
+                    ip_mod_enable: 0,  // 本地转发不需要修改IP
+                    new_src_ip: 0,
+                    new_dst_ip: 0,    // 保持为0，表示本机
+                    allowed_ip,
+                    allowed_mask,
+                    padding: [0; 3],
+                };
+
+                // Insert local forward rule
+                pkt_mod_rules.insert(key, val, 0)?;
+                info!("Added local forward: {}:{} -> :{} (from {})", 
+                      rule.protocol, port, rule.target_port, source);
             }
         }
     }

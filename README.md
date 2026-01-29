@@ -4,7 +4,8 @@
 
 ## 功能特性
 
-- **端口转发**：TCP 端口流量转发和负载均衡
+- **远程端口转发**：TCP 端口流量转发到其他服务器
+- **本地端口转发**：本机端口重定向到其他端口（127.0.0.1）
 - **文件监控**：文件访问控制（读写删除等操作）
 - **进程监控**：进程执行监控和控制
 - **网络安全**：基于 XDP/TC 的高速网络数据包处理
@@ -68,22 +69,46 @@ echo "your_password" | sudo -S ./target/x86_64-unknown-linux-musl/release/forwar
 
 ### 统一安全代理
 
-1. 配置文件 `unified_config.json`：
+#### 远程端口转发配置
 ```json
 {
-  "file_mode": "Protect",
-  "process_mode": "Monitor", 
   "network": {
     "enabled": true,
     "engine": "xdp",
     "interface": "enp2s0",
-    "block_ports": [23],
     "forward_rules": [
       {
         "listen_port": [1000],
         "target_host": "192.168.3.4", 
         "target_port": 22,
-        "protocol": "tcp"
+        "protocol": "tcp",
+        "allowed_sources": ["0.0.0.0/0"]
+      }
+    ]
+  }
+}
+```
+
+#### 本地端口转发配置
+```json
+{
+  "network": {
+    "enabled": true,
+    "engine": "xdp", 
+    "interface": "enp2s0",
+    "forward_rules": [],
+    "local_forward_rules": [
+      {
+        "listen_port": [8080],
+        "target_port": 80,
+        "protocol": "tcp",
+        "allowed_sources": ["0.0.0.0/0"]
+      },
+      {
+        "listen_port": ["9000-9010"],
+        "target_port": 3000,
+        "protocol": "tcp",
+        "allowed_sources": ["192.168.1.0/24"]
       }
     ]
   },
@@ -118,11 +143,20 @@ echo "your_password" | sudo -S ./target/release/demo config.json
 
 ## 配置说明
 
-### 端口转发规则
+### 远程端口转发规则（forward_rules）
 - `listen_port`: 监听端口（支持单个端口或端口范围）
 - `target_host`: 目标主机 IP
 - `target_port`: 目标端口
+- `protocol`: 协议类型（tcp/udp）
 - `allowed_sources`: 允许的源 IP（CIDR 格式）
+
+### 本地端口转发规则（local_forward_rules）
+- `listen_port`: 监听端口（支持单个端口或端口范围）
+- `target_port`: 本机目标端口
+- `protocol`: 协议类型（tcp/udp）
+- `allowed_sources`: 允许的源 IP（CIDR 格式）
+
+**注意**：本地转发不需要 `target_host`，流量直接重定向到本机的指定端口。
 
 ### 文件访问规则
 - `path_prefix`: 文件路径前缀
