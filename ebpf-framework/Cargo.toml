@@ -1,0 +1,9 @@
+[package]
+name = "ebpf-framework"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ebpf-common = { path = "../ebpf-common" }
+ebpf-probes = { path = "../ebpf-probes" }
+thiserror = "1"

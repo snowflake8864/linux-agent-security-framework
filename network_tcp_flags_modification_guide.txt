@@ -1,0 +1,114 @@
+# 网络TCP Flags修改测试指南
+
+## 概述
+本指南详细介绍eBPF Linux Agent Security Framework中TCP flags修改功能的测试方法。包括XDP (ingress)和TC (egress)，支持双向测试。重点测试reserved bits修改，如设置最高位(bit 3)。
+
+## 环境准备
+- Linux内核4.15+支持eBPF
+- Rust环境，clang工具链
+- sudo权限
+- 网络接口：如br0或enp2s0，确保UP状态
+- 工具：tcpdump, nc, tc
+
+## 编译
+```bash
+cargo zigbuild --target x86_64-unknown-linux-musl --release
+cargo run -p xtask -- build-bpf
+cp bpf/*.bpf.o target/x86_64-unknown-linux-musl/bpf/
+```
+
+## 测试前环境清理
+每次测试前执行，避免冲突：
+- Kill进程：`sudo pkill -f netmod`
+- 卸载程序：`sudo tc qdisc del dev <interface> clsact` (TC), `sudo ip link set dev <interface> xdpgeneric off` (XDP)
+- 重置：`sudo tc qdisc add dev <interface> clsact`
+- 验证：`sudo tc qdisc show dev <interface>` (clsact), `sudo bpftool prog list` (无残留)
+
+## XDP测试 (Ingress: 入站包修改)
+XDP修改入站包。
+
+### 配置文件 (xdp_config.json)
+```json
+{
+  "rules": [
+    {
+      "match_rule": {
+        "protocol": "tcp",
+        "direction": "ingress",
+        "dst_port": 1234,
+        "dst_ip": [192, 168, 134, 81]
+      },
+      "modification": {
+        "tcp_flags": {
+          "reserved_bits_mask": 8,
+          "reserved_bits_value": 8
+        }
+      }
+    }
+  ]
+}
+```
+
+### 步骤
+1. 清理环境
+2. 运行：`sudo ./target/x86_64-unknown-linux-musl/release/netmod-xdp --interface <interface> --config xdp_config.json`
+3. 发送入站：从远程 `echo "test" | nc <local_ip> 1234`
+4. 抓包：`sudo tcpdump -i <interface> -nn host <local_ip> and port 1234 -c 1 -v -X`
+5. 分析：TCP byte 12低4位应为1000 (bit 3置位)
+
+## TC测试 (Egress: 出站包修改)
+TC修改出站包。
+
+### 配置文件 (tc_config.json)
+```json
+{
+  "rules": [
+    {
+      "match_rule": {
+        "protocol": "tcp",
+        "direction": "egress",
+        "dst_port": 1234,
+        "dst_ip": [192, 168, 134, 81]
+      },
+      "modification": {
+        "tcp_flags": {
+          "reserved_bits_mask": 8,
+          "reserved_bits_value": 8
+        }
+      }
+    }
+  ]
+}
+```
+
+### 步骤
+1. 清理环境
+2. 运行：`sudo ./target/x86_64-unknown-linux-musl/release/netmod-tc --interface <interface> --config tc_config.json`
+3. 发送出站：`echo "test" | nc 192.168.134.81 1234`
+4. 抓包：`sudo tcpdump -i <interface> -nn host 192.168.134.81 and port 1234 -c 1 -v -X`
+5. 分析：TCP byte 12低4位1000
+
+## 双向测试 (XDP + TC)
+1. 清理环境
+2. 运行XDP和TC同时：使用各自config
+3. 测试出站和入站
+4. 抓包分析双向修改
+
+## 不同配置示例
+- **多规则**：添加多个rules
+- **端口/IP修改**：使用port_mod/ip_mod
+- **全reserved设置**：`"set_reserved": true`
+
+## 故障排除
+- **运行出错**：清理qdisc重新添加
+- **未修改**：检查direction, IP字节序, config语法
+- **抓包无包**：检查route和接口
+- **Checksum错误**：正常，未更新checksum
+- **进程冲突**：Kill进程
+- **调试**：`sudo dmesg | tail`, 添加bpf_printk
+
+## 注意事项
+- 在隔离环境测试
+- 使用wireshark分析pcap
+- 备份重要数据</content>
+<parameter name="filePath">network_tcp_flags_modification_guide.txt

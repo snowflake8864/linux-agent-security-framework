@@ -1,0 +1,16 @@
+[package]
+name = "netmod-tc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ebpf-common = { path = "../../ebpf-common" }
+ebpf-probes = { path = "../../ebpf-probes" }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+aya = { version = "0.12", features = ["async_tokio"] }
+chrono = "0.4"
+ctrlc = "3.4"
+signal-hook = "0.3"
+bytes = "1"

@@ -1,0 +1,112 @@
+# eBPF Linux Agent Security Framework - 手动测试指南
+
+## 概述
+本框架提供文件/进程阻断和网络包修改功能。通过eBPF LSM和XDP实现。
+
+## 环境准备
+- Linux内核支持eBPF
+- Rust环境
+- 网络接口权限
+
+## 编译
+```bash
+# 构建应用
+cargo build --release --target x86_64-unknown-linux-musl --bin demo
+cargo build --release --target x86_64-unknown-linux-musl --bin netmod
+
+# 构建BPF对象
+cargo run -p xtask -- build-bpf
+```
+
+## 测试步骤
+
+### 1. 文件阻断测试
+**目标**: 验证LSM文件操作阻断
+
+**步骤**:
+1. 准备配置文件 `config.json` (包含file_rules)
+2. 运行demo: `sudo ./target/x86_64-unknown-linux-musl/release/demo config.json`
+3. 观察输出: "✓ Attached: enforce_file_open"
+4. 在另一个terminal尝试: `touch /tmp/ebpf_test_file`
+5. 预期结果: 命令失败，"Permission denied"
+
+**验证**:
+- demo日志显示文件访问事件
+- touch命令返回非0退出码
+
+### 2. 进程阻断测试
+**目标**: 验证LSM进程执行阻断
+
+**步骤**:
+1. demo运行中
+2. 在另一个terminal运行: `nc.openbsd localhost 1234`
+3. 预期结果: 进程启动失败
+
+**验证**:
+- nc命令无法执行
+- demo日志显示进程阻断事件
+
+### 3. 网络包修改测试
+**目标**: 验证XDP TCP flag修改
+
+**步骤**:
+1. 准备netmod配置 `netmod_config.json`:
+   ```json
+   {
+     "rules": [
+       {
+         "match_rule": {
+           "protocol": "tcp",
+           "dst_port": 80
+         },
+         "modification": {
+           "tcp_flags": {
+             "set_reserved": true
+           }
+         }
+       }
+     ]
+   }
+   ```
+2. 运行netmod: `sudo ./target/x86_64-unknown-linux-musl/release/netmod --interface eth0 --config netmod_config.json`
+3. 观察输出: "✅ XDP packet processing active!"
+4. 发送TCP数据: `echo "test" | nc -w 1 192.168.134.81 80`
+5. 在目标机器监听: `nc -l 80`
+
+**验证**:
+- netmod显示规则加载
+- 目标机器接收数据
+- 抓包验证TCP SYN flags的CWR和ECE位为1
+
+### 4. 持续监听测试
+**目标**: 验证长期运行和信号处理
+
+**步骤**:
+1. 运行demo或netmod
+2. 发送信号: `kill -TERM <pid>` 或 Ctrl+C
+3. 预期结果: 优雅退出，清理eBPF程序
+
+**验证**:
+- 程序输出"graceful shutdown"
+- 系统无残留eBPF程序
+
+## 故障排除
+- **权限错误**: 使用sudo运行
+- **接口错误**: 检查 `ip link show`，使用UP状态接口
+- **编译失败**: 确保musl工具链安装
+- **规则不生效**: 检查配置文件语法
+
+## 预期输出示例
+```
+🌐 Linux Agent Security Framework Demo
+✓ Loaded configuration
+✓ Loaded BPF object
+✓ Loaded BTF
+✓ Attached: enforce_file_open
+🔒 LSM hooks active
+```
+
+## 注意事项
+- 测试前备份重要数据
+- 在隔离环境测试网络功能
+- 监控系统日志: `dmesg | grep bpf`

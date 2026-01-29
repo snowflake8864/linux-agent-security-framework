@@ -1,0 +1,33 @@
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Config files (may contain sensitive data)
+*_config.json
+config.json
+
+# BPF compiled objects
+*.bpf.o
+
+# Temporary files
+/tmp/
+*.tmp
+
+# Build artifacts
+/release/
+/debug/

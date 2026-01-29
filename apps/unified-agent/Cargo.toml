@@ -1,0 +1,19 @@
+[package]
+name = "unified-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ebpf-common = { path = "../../ebpf-common" }
+ebpf-framework = { path = "../../ebpf-framework" }
+aya = "0.12"
+aya-obj = "0.1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+ctrlc = "3.4"
+log = "0.4"
+env_logger = "0.10"
+anyhow = "1.0"
+libc = "0.2"

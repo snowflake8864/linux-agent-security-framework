@@ -1,0 +1,10 @@
+[package]
+name = "ebpf-probes"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya = { version = "0.12", features = ["async_tokio"] }
+ebpf-common = { path = "../ebpf-common" }
+thiserror = "1"
+libc = "0.2"

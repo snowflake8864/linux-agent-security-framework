@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "ebpf-common",
+    "apps/demo",
+    "apps/netmod-xdp",
+    "apps/netmod-tc",
+    "apps/forward",
+    "apps/unified-agent",
+    "xtask",
+]
+exclude = ["ebpf-probes-rust", "ebpf-probes", "ebpf-framework"]
+resolver = "2"
