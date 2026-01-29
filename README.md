@@ -1,125 +1,123 @@
 # Linux Agent Security Framework
 
-一个基于 eBPF 的 Linux 系统安全代理框架，提供网络端口转发、文件访问控制、进程监控和网络安全防护功能。
+基于 eBPF 技术实现的 Linux 安全防护框架，集成了高性能网络转发（NAT）、内核级文件访问控制（LSM）和进程监控。
 
-## 功能特性
+该项目通过 XDP 和 TC 钩子在内核网络早期处理数据包，并通过 BPF LSM 实现对系统调用的实时拦截，为 Linux 服务器提供轻量级、低延迟的安全保障。
 
-- **远程端口转发**：TCP 端口流量转发到其他服务器
-- **本地端口转发**：本机端口重定向到其他端口（127.0.0.1）
-- **文件监控**：文件访问控制（读写删除等操作）
-- **进程监控**：进程执行监控和控制
-- **网络安全**：基于 XDP/TC 的高速网络数据包处理
+---
 
-## 系统要求
+## 📋 系统要求与环境配置
 
-- Linux 内核 >= 5.8（支持 eBPF）
-- Rust 1.70+
-- clang/llvm
-- libbpf 开发包
+在运行本项目前，请务必检查并配置您的内核环境，否则 LSM 等核心功能将无法启动。
 
-## 安装编译
+### 1. 内核版本
+- **最低要求**: Linux Kernel 5.8
+- **推荐版本**: Linux Kernel 5.10+ (对 BTF 和 LSM 钩子的支持更完善)
 
-### 1. 安装依赖
+### 2. 内核编译选项 (Kconfig)
+确保内核开启了以下功能（大多数现代发行版如 Ubuntu 20.04+ 已开启）：
+- `CONFIG_BPF=y`
+- `CONFIG_BPF_LSM=y` (用于文件/进程防护)
+- `CONFIG_DEBUG_INFO_BTF=y` (支持免头文件 BPF 编译)
+- `CONFIG_BPF_JIT=y`
+
+**检查命令**:
 ```bash
-# Ubuntu/Debian
+grep -E "CONFIG_BPF_LSM|CONFIG_DEBUG_INFO_BTF" /boot/config-$(uname -r)
+```
+
+### 3. GRUB 配置 (启用 BPF LSM)
+由于安全原因，很多系统默认禁用了 BPF LSM。你需要通过 GRUB 手动开启：
+
+1. 编辑 `/etc/default/grub`。
+2. 在 `GRUB_CMDLINE_LINUX_DEFAULT` 参数中加入 `lsm=lockdown,yama,apparmor,bpf`（关键是必须包含 `bpf`）。
+   - 例如：`GRUB_CMDLINE_LINUX_DEFAULT="quiet splash lsm=lockdown,yama,apparmor,bpf"`
+3. 更新 GRUB 配置：`sudo update-grub`。
+4. **重启系统**。
+5. 重启后验证：`cat /sys/kernel/security/lsm`。输出中若包含 `bpf` 则表示启用成功。
+
+---
+
+## 🚀 编译与安装
+
+### 1. 安装编译依赖 (Ubuntu/Debian)
+```bash
 sudo apt update
-sudo apt install build-essential clang llvm libelf-dev libbpf-dev
-
-# CentOS/RHEL
-sudo yum groupinstall "Development Tools"
-sudo yum install clang llvm elfutils-libelf-devel libbpf-devel
+sudo apt install -y build-essential clang llvm libelf-dev libbpf-dev pkg-config zig
+# 安装 Rust 及相关组件
+rustup component add rust-src
+cargo install cargo-zigbuild
 ```
 
-### 2. 编译 eBPF 内核模块
+### 2. 编译项目
 ```bash
+# 1. 编译内核态 eBPF 代码 (生成的 .o 文件在 bpf/ 目录)
 cargo run -p xtask -- build-bpf
-```
 
-### 3. 编译用户态程序
-```bash
+# 2. 编译用户态程序 (推荐 musl 静态编译)
 cargo zigbuild --release --target x86_64-unknown-linux-musl
 ```
 
-## 使用方法
+---
 
-### 端口转发应用
+## 🛠 功能模块详解
 
-1. 配置文件 `forward_config.json`：
+### 1. 网络转发 (NAT & Redirect)
+- **远程转发**: 将本机监听端口的流量转发到内网其他服务器。支持自动 SNAT/DNAT，解决回包路由问题。
+- **本地重定向**: 将外部访问重定向到本机的另一个端口。例如：外部访问 5555 端口，内核自动转到本地的 22 (SSH)。
+- **ACL 控制**: 支持基于 CIDR (网段) 的源 IP 白名单过滤。
+
+### 2. 文件安全管控 (LSM File Security)
+- **多维度审计**: 监控文件的 `Read`, `Write`, `Create`, `Delete` 行为。
+- **强制阻断**: 在内核层拦截非法操作。即使是 root 用户，在 `Protect` 模式下也无法操作受保护的文件。
+
+### 3. 进程安全 (Process Control)
+- **启动拦截**: 阻断非法的二进制文件执行。
+- **comm 匹配**: 基于进程名称实现简单的白名单/黑名单管控。
+
+---
+
+## ⚙️ 配置文件全解析 (`unified_config.json`)
+
 ```json
 {
-  "forward_rules": [
-    {
-      "listen_port": [1000, "2000-2010"],
-      "target_host": "192.168.134.81",
-      "target_port": 22,
-      "allowed_sources": ["0.0.0.0/0"]
-    }
-  ]
-}
-```
-
-2. 运行端口转发：
-```bash
-echo "your_password" | sudo -S ./target/x86_64-unknown-linux-musl/release/forward \
-  --config forward_config.json \
-  --bpf-obj bpf/forward.bpf.o \
-  --interface enp2s0 \
-  --cgroup /sys/fs/cgroup
-```
-
-### 统一安全代理
-
-#### 远程端口转发配置
-```json
-{
+  "file_mode": "Protect",     // 全局文件模式: Monitor (仅记录) / Protect (阻断)
+  "process_mode": "Protect",  // 全局进程模式: Monitor / Protect
   "network": {
-    "enabled": true,
-    "engine": "xdp",
-    "interface": "enp2s0",
-    "forward_rules": [
+    "enabled": true,          // 是否启用网络功能
+    "engine": "xdp",          // 引擎: xdp (极致性能) / tc (更好的兼容性)
+    "interface": "enp2s0",    // 必须指定正确的网卡名
+    "block_ports": [23, 445], // 全局静默丢弃这些端口的包
+    
+    "forward_rules": [        // 远程转发规则
       {
-        "listen_port": [1000],
-        "target_host": "192.168.3.4", 
+        "listen_port": [1000, "2000-2010"], // 支持单个端口或范围
+        "target_host": "192.168.3.4",       // 转发目标 IP
+        "target_port": 22,                  // 目标端口
+        "protocol": "tcp",                  // 协议类型: tcp / udp
+        "allowed_sources": ["10.0.0.0/8"]   // 源 IP 限制
+      }
+    ],
+    
+    "local_forward_rules": [  // 本地重定向规则
+      {
+        "listen_port": [5555],
         "target_port": 22,
         "protocol": "tcp",
         "allowed_sources": ["0.0.0.0/0"]
       }
     ]
-  }
-}
-```
-
-#### 本地端口转发配置
-```json
-{
-  "network": {
-    "enabled": true,
-    "engine": "xdp", 
-    "interface": "enp2s0",
-    "forward_rules": [],
-    "local_forward_rules": [
-      {
-        "listen_port": [8080],
-        "target_port": 80,
-        "protocol": "tcp",
-        "allowed_sources": ["0.0.0.0/0"]
-      },
-      {
-        "listen_port": ["9000-9010"],
-        "target_port": 3000,
-        "protocol": "tcp",
-        "allowed_sources": ["192.168.1.0/24"]
-      }
-    ]
   },
-  "file_rules": [
+  
+  "file_rules": [             // 文件监控细则 (路径匹配)
     {
-      "path_prefix": "/tmp/secret.txt",
+      "path_prefix": "/etc/shadow",
       "operations": ["Read", "Write"],
       "action": "Deny"
     }
   ],
-  "process_rules": [
+  
+  "process_rules": [          // 进程监控细则 (名称匹配)
     {
       "comm": "nc",
       "action": "Deny"
@@ -128,110 +126,56 @@ echo "your_password" | sudo -S ./target/x86_64-unknown-linux-musl/release/forwar
 }
 ```
 
-2. 运行统一代理：
-```bash
-echo "your_password" | sudo -S ./target/x86_64-unknown-linux-musl/release/unified-agent \
-  --config unified_config.json \
-  --cgroup /sys/fs/cgroup
-```
+## 📂 项目结构说明
 
-### Demo 应用
+本框架采用模块化设计，清晰划分了内核态探针、用户态管理程序及共享库。
 
-```bash
-echo "your_password" | sudo -S ./target/release/demo config.json
-```
+### 1. 核心目录
+- **`ebpf-probes/`**: eBPF 内核态核心。
+    - `bpf/`: 包含所有 C 编写的 `.bpf.c` 源码（如 `unified_agent.bpf.c`）及其编译生成的 `.o` 对象。
+    - `src/`: 探针的用户态管理逻辑，负责加载、挂载及与内核交互。
+- **`ebpf-common/`**: 跨界共享库。
+    - 定义了内核态与用户态通用的结构体（Event、Rule、PacketInfo 等），确保数据在 C 和 Rust 之间无缝传递。
+- **`apps/`**: 用户态功能实现。
+    - `unified-agent/`: **推荐使用**。集成了网络转发、LSM 防护等全功能的统一代理解析器。
+    - `forward/`: 专注于高性能远程端口转发的独立工具。
+    - `demo/`: 用于快速验证 LSM 文件/进程监控能力的演示应用。
+- **`xtask/`**: 自动化构建工具。
+    - 封装了复杂的 `clang` 和 `llvm` 命令，通过 `cargo run -p xtask -- build-bpf` 即可一键编译所有内核探针。
 
-## 配置说明
+### 2. 其他模块
+- **`ebpf-framework/`**: 封装了底层 eBPF 操作的通用框架逻辑。
+- **`bpf/`**: (根目录下) 存放编译好的 eBPF 字节码，供程序运行时加载。
 
-### 远程端口转发规则（forward_rules）
-- `listen_port`: 监听端口（支持单个端口或端口范围）
-- `target_host`: 目标主机 IP
-- `target_port`: 目标端口
-- `protocol`: 协议类型（tcp/udp）
-- `allowed_sources`: 允许的源 IP（CIDR 格式）
+---
 
-### 本地端口转发规则（local_forward_rules）
-- `listen_port`: 监听端口（支持单个端口或端口范围）
-- `target_port`: 本机目标端口
-- `protocol`: 协议类型（tcp/udp）
-- `allowed_sources`: 允许的源 IP（CIDR 格式）
+## 🧪 测试与验证
 
-**注意**：本地转发不需要 `target_host`，流量直接重定向到本机的指定端口。
+### 1. 网络转发测试
+1. 修改配置：设置本地转发 `5555 -> 22`。
+2. 启动代理：`sudo ./target/x86_64-unknown-linux-musl/release/unified-agent --config config.json --interface eth0`
+3. 连接测试：`ssh -p 5555 user@127.0.0.1`。
+4. 观察内核日志（开启另一个终端）：
+   ```bash
+   sudo cat /sys/kernel/debug/tracing/trace_pipe
+   ```
+   你应该能看到 `[XDP] Forward` 和 `[TC] Reverse NAT` 的相关输出。
 
-### 文件访问规则
-- `path_prefix`: 文件路径前缀
-- `operations`: 操作类型（Read/Write/Create/Delete）
-- `action`: 动作（Allow/Deny）
+### 2. 文件保护测试
+1. 在 `file_rules` 中添加对 `/tmp/test.txt` 的 `Deny` 规则。
+2. 尝试操作该文件：`touch /tmp/test.txt` 或 `rm /tmp/test.txt`。
+3. 预期结果：系统报错 `Operation not permitted`。
 
-### 进程控制规则
-- `comm`: 进程名称
-- `action`: 动作（Allow/Deny）
-- `mode`: 模式（Monitor/Protect）
+---
 
-## 故障排查
+## 📂 常见问题 (FAQ)
 
-1. **检查内核版本**：
-```bash
-uname -r
-```
+1. **转发不通？**
+   - 检查 `sysctl net.ipv4.ip_forward` 是否为 1。
+   - 确认 `--interface` 后面接的是活跃的网卡名（用 `ip link` 查看）。
+2. **LSM 规则没生效？**
+   - 检查内核版本是否满足 5.8+。
+   - 检查 `cat /sys/kernel/security/lsm` 确认 `bpf` 是否在输出列表中。
+3. **编译报错？**
+   - 确保安装了 `libbpf-dev` 和 `clang`，且已经执行了 `build-bpf` 任务。
 
-2. **查看 eBPF 程序状态**：
-```bash
-sudo bpftool prog list
-```
-
-3. **检查日志**：
-```bash
-sudo dmesg | grep -i ebpf
-sudo journalctl -f
-```
-
-4. **权限问题**：
-确保以 root 权限运行，或者配置适当的 sudo 规则。
-
-5. **网络接口确认**：
-```bash
-ip addr show
-```
-
-## 项目结构
-
-```
-├── apps/                # 用户态应用
-│   ├── forward/        # 端口转发
-│   ├── unified-agent/  # 统一代理
-│   └── demo/           # 演示程序
-├── bpf/                # 编译好的 eBPF 对象文件
-├── ebpf-common/        # 共享的 eBPF 定义
-└── xtask/             # 构建任务
-```
-
-## 开发
-
-### 添加新功能
-1. 在 `ebpf-common` 中定义新的 eBPF 数据结构
-2. 在对应的应用目录中实现用户态逻辑
-3. 更新配置文件格式
-
-### 调试 eBPF 程序
-```bash
-# 查看 eBPF 映射
-sudo bpftool map list
-
-# 查看程序日志
-sudo bpftool prog dump xlated id <prog_id>
-```
-
-## 许可证
-
-MIT License
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request。
-
-## 注意事项
-
-- 需要 root 权限运行
-- 生产环境请充分测试
-- eBPF 程序可能影响系统性能，建议在测试环境验证
