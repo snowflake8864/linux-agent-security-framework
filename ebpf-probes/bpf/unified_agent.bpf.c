@@ -506,12 +506,25 @@ int xdp_packet_filter(struct xdp_md *ctx) {
     }
 
     // 3. Mod rule hit: Forward + SNAT
+    // Determine target IP and port
+    __u32 target_ip = dst_ip;
+    if (rule->ip_mod_enable && rule->new_dst_ip != 0) {
+        target_ip = rule->new_dst_ip;
+    }
+    __u16 target_port = rule->port_mod_enable ? rule->new_dst_port : dst_port;
+
+    // Determine if we should SNAT (only for remote forwarding)
+    __u32 new_src_ip = src_ip;
+    if (rule->ip_mod_enable && rule->new_dst_ip != 0) {
+        new_src_ip = dst_ip; // SNAT to local IP
+    }
+
     // Store reverse mapping for return traffic
     struct reverse_key rev_k;
     __builtin_memset(&rev_k, 0, sizeof(rev_k));
-    rev_k.target_ip = rule->new_dst_ip;
-    rev_k.target_port = rule->port_mod_enable ? rule->new_dst_port : dst_port;
-    rev_k.client_ip = dst_ip;
+    rev_k.target_ip = target_ip;
+    rev_k.target_port = target_port;
+    rev_k.client_ip = new_src_ip; 
     rev_k.client_port = src_port;
     
     struct reverse_value rev_v;
@@ -522,30 +535,43 @@ int xdp_packet_filter(struct xdp_md *ctx) {
     
     bpf_map_update_elem(&reverse_rules, &rev_k, &rev_v, BPF_ANY);
 
+    bpf_printk("[XDP] Forward: %pI4 -> %pI4", &src_ip, &dst_ip);
+    bpf_printk("[XDP]   Target: %pI4:%u, SNAT: %pI4", &target_ip, bpf_ntohs(target_port), &new_src_ip);
+
     if (protocol == 6) {
         struct tcphdr *tcp = l4_hdr;
         if ((void *)(tcp + 1) > data_end) return XDP_PASS;
         // DNAT
-        csum_replace4(&tcp->check, dst_ip, rule->new_dst_ip);
-        csum_replace2(&tcp->check, dst_port, rule->new_dst_port);
-        tcp->dest = rule->new_dst_port;
+        if (target_ip != dst_ip) {
+            csum_replace4(&tcp->check, dst_ip, target_ip);
+        }
+        if (target_port != dst_port) {
+            csum_replace2(&tcp->check, dst_port, target_port);
+            tcp->dest = target_port;
+        }
         // SNAT
-        csum_replace4(&tcp->check, src_ip, dst_ip);
+        if (new_src_ip != src_ip) {
+            csum_replace4(&tcp->check, src_ip, new_src_ip);
+        }
     } else {
         struct udphdr *udp = l4_hdr;
         if ((void *)(udp + 1) > data_end) return XDP_PASS;
         if (udp->check) {
-            csum_replace4(&udp->check, dst_ip, rule->new_dst_ip);
-            csum_replace2(&udp->check, dst_port, rule->new_dst_port);
-            csum_replace4(&udp->check, src_ip, dst_ip);
+            if (target_ip != dst_ip) csum_replace4(&udp->check, dst_ip, target_ip);
+            if (target_port != dst_port) csum_replace2(&udp->check, dst_port, target_port);
+            if (new_src_ip != src_ip) csum_replace4(&udp->check, src_ip, new_src_ip);
         }
-        udp->dest = rule->new_dst_port;
+        udp->dest = target_port;
     }
     
-    csum_replace4(&ip->check, dst_ip, rule->new_dst_ip);
-    ip->daddr = rule->new_dst_ip;
-    csum_replace4(&ip->check, src_ip, dst_ip);
-    ip->saddr = dst_ip;
+    if (target_ip != dst_ip) {
+        csum_replace4(&ip->check, dst_ip, target_ip);
+        ip->daddr = target_ip;
+    }
+    if (new_src_ip != src_ip) {
+        csum_replace4(&ip->check, src_ip, new_src_ip);
+        ip->saddr = new_src_ip;
+    }
 
     send_network_event(protocol, src_ip, dst_ip, src_port, dst_port, 0x40);
     return XDP_PASS;
@@ -590,6 +616,57 @@ int tc_packet_filter(struct __sk_buff *skb) {
     if (blocked && *blocked) {
         send_network_event(protocol, src_ip, dst_ip, src_port, dst_port, 0x80);
         return TC_ACT_SHOT;
+    }
+
+    // --- Reverse Mapping Check (for return traffic) ---
+    struct reverse_key r_key;
+    __builtin_memset(&r_key, 0, sizeof(r_key));
+    r_key.target_ip = src_ip;
+    r_key.target_port = src_port;
+    r_key.client_ip = dst_ip;
+    r_key.client_port = dst_port;
+
+    struct reverse_value *r_val = bpf_map_lookup_elem(&reverse_rules, &r_key);
+    if (r_val) {
+        bpf_printk("[TC] Reverse NAT: %pI4 -> %pI4", &src_ip, &dst_ip);
+        bpf_printk("[TC]   Ports: %u -> %u", bpf_ntohs(src_port), bpf_ntohs(dst_port));
+        bpf_printk("[TC]   => %pI4:%u",
+                   &r_val->local_ip, bpf_ntohs(r_val->local_port));
+
+        if (protocol == 6) {
+            struct tcphdr *tcp = l4;
+            if ((void *)(tcp + 1) > data_end) return TC_ACT_OK;
+            // 1. Translate Source: target -> local
+            if (src_ip != r_val->local_ip) csum_replace4(&tcp->check, src_ip, r_val->local_ip);
+            if (src_port != r_val->local_port) {
+                csum_replace2(&tcp->check, src_port, r_val->local_port);
+                tcp->source = r_val->local_port;
+            }
+            // 2. Translate Destination: agent -> client
+            if (dst_ip != r_val->client_ip) csum_replace4(&tcp->check, dst_ip, r_val->client_ip);
+            // Dest port remains same (client_port == dst_port)
+        } else {
+            struct udphdr *udp = l4;
+            if ((void *)(udp + 1) > data_end) return TC_ACT_OK;
+            if (udp->check) {
+                if (src_ip != r_val->local_ip) csum_replace4(&udp->check, src_ip, r_val->local_ip);
+                if (src_port != r_val->local_port) csum_replace2(&udp->check, src_port, r_val->local_port);
+                if (dst_ip != r_val->client_ip) csum_replace4(&udp->check, dst_ip, r_val->client_ip);
+            }
+            udp->source = r_val->local_port;
+        }
+        
+        if (src_ip != r_val->local_ip) {
+            csum_replace4(&ip->check, src_ip, r_val->local_ip);
+            ip->saddr = r_val->local_ip;
+        }
+        if (dst_ip != r_val->client_ip) {
+            csum_replace4(&ip->check, dst_ip, r_val->client_ip);
+            ip->daddr = r_val->client_ip;
+        }
+        
+        send_network_event(protocol, src_ip, dst_ip, src_port, dst_port, 0x40);
+        return TC_ACT_OK;
     }
 
     // Find rule (Egress = 2 for TC egress)
